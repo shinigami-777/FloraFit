@@ -25,7 +25,7 @@ parallel_z <- function(z1, z2) {
   (z1 * z2) / (z1 + z2)
 }
 
-z_shell <- function(w, PE, CM, RCYT, RV, CT) {
+z_shell <- function(w, RE, CM, RCYT, RV, CT) {
   membrane <- z_c(w, CM)
   vacuole <- RV / (1 + 1i * w * RV * CT)
   RE + membrane + RCYT + vacuole
