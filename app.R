@@ -23,9 +23,18 @@ read_eis_csv <- function(path) {
 
 format_params <- function(theta) {
   data.frame(
-    Parameter = PARAM_NAMES,
-    Value     = signif(theta, 4),
-    Unit      = PARAM_UNITS,
+    Parameter = names(theta),
+    Value     = signif(as.numeric(theta), 4),
+    Unit      = "",
+    stringsAsFactors = FALSE
+  )
+}
+
+format_model_params <- function(theta, units) {
+  data.frame(
+    Parameter = names(theta),
+    Value     = signif(as.numeric(theta), 4),
+    Unit      = units,
     stringsAsFactors = FALSE
   )
 }
@@ -41,7 +50,14 @@ ui <- fluidPage(
                 accept = c(".csv", "text/csv")),
       helpText("CSV columns required: frequency_Hz, Z_real, Z_imag."),
       checkboxInput("use_sample", "Use bundled sample (data/sample_eis.csv)", TRUE),
-      actionButton("fit", "Fit floral circuit", class = "btn-primary"),
+      selectInput("model_id", "Fitting model", choices = MODEL_CHOICES, selected = "voigt"),
+      conditionalPanel(
+        condition = "input.model_id == 'voigt'",
+        numericInput("voigt_n", "Voigt RC branches (N)", value = 2, min = 1, max = 6, step = 1)
+      ),
+      uiOutput("initial_guess_ui"),
+      actionButton("reset_guess", "Reset initial guesses"),
+      actionButton("fit", "Fit circuit", class = "btn-primary"),
       hr(),
       h4("Fit summary"),
       verbatimTextOutput("summary"),
@@ -65,6 +81,10 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
+  model_spec <- reactive({
+    get_model_spec(input$model_id, voigt_n = input$voigt_n %||% 2L)
+  })
+
   data_in <- reactive({
     if (isTRUE(input$use_sample) && is.null(input$file)) {
       if (!file.exists("data/sample_eis.csv")) {
@@ -83,35 +103,97 @@ server <- function(input, output, session) {
              })
   })
 
+  default_guess <- reactive({
+    d <- data_in()
+    req(d)
+    spec <- model_spec()
+    default_initial_guess_by_model(
+      d$freq, d$Z,
+      model_id = spec$id,
+      voigt_n = input$voigt_n %||% 2L
+    )
+  })
+
+  guess_values <- reactiveVal(NULL)
+
+  observeEvent(default_guess(), {
+    guess_values(default_guess())
+  }, ignoreInit = FALSE)
+
+  observeEvent(input$reset_guess, {
+    guess_values(default_guess())
+  })
+
+  output$initial_guess_ui <- renderUI({
+    spec <- model_spec()
+    dflt <- guess_values()
+    if (is.null(dflt)) dflt <- default_guess()
+    dflt <- dflt[spec$param_names]
+
+    controls <- lapply(spec$param_names, function(p) {
+      val <- as.numeric(dflt[[p]])
+      lower <- as.numeric(spec$lower[[p]])
+      upper <- as.numeric(spec$upper[[p]])
+      step <- if (val >= 1) 1 else 10^floor(log10(max(val, 1e-12)))
+      numericInput(
+        inputId = paste0("guess_", p),
+        label = sprintf("%s [%s]", p, spec$param_units[match(p, spec$param_names)]),
+        value = signif(val, 6),
+        min = lower,
+        max = upper,
+        step = step
+      )
+    })
+    do.call(tagList, controls)
+  })
+
+  user_guess <- reactive({
+    spec <- model_spec()
+    dflt <- default_guess()
+    vals <- vapply(spec$param_names, function(p) {
+      v <- input[[paste0("guess_", p)]]
+      if (is.null(v) || !is.finite(v)) dflt[[p]] else as.numeric(v)
+    }, numeric(1))
+    names(vals) <- spec$param_names
+    vals
+  })
+
   fit_result <- eventReactive(input$fit, {
     d <- data_in()
     req(d)
+    spec <- model_spec()
+    theta_init <- user_guess()
     withProgress(message = "Fitting circuit...", value = 0.3, {
-      fit_floral_circuit(d$freq, d$Z)
+      fit_impedance_model(
+        d$freq, d$Z,
+        model_id = spec$id,
+        theta_init = theta_init,
+        voigt_n = input$voigt_n %||% 2L
+      )
     })
   }, ignoreNULL = FALSE)
 
   output$summary <- renderPrint({
     fit <- fit_result()
     if (is.null(fit)) {
-      cat("Press 'Fit floral circuit' after loading data.\n")
+      cat("Press 'Fit circuit' after loading data.\n")
       return(invisible())
     }
+    cat("Model:      ", fit$model_label, "\n", sep = "")
     cat("Converged: ", fit$converged, "\n", sep = "")
     cat("Iterations: ", fit$niter, "\n", sep = "")
     cat("R^2:        ", signif(fit$r2, 5), "\n", sep = "")
     cat("RMSE [Ohm]: ", signif(fit$rmse, 5), "\n", sep = "")
-    cat("tau_V [s]:  ", signif(fit$tau_V, 4),
-        "  (R_V * C_T)\n", sep = "")
-    cat("tau_M [s]:  ", signif(fit$tau_M, 4),
-        "  (R_E * C_M)\n", sep = "")
+    if (length(fit$extra_summary) > 0) {
+      cat(paste0(fit$extra_summary, collapse = "\n"), "\n", sep = "")
+    }
     cat("LM message: ", fit$message, "\n", sep = "")
   })
 
   output$params <- DT::renderDT({
     fit <- fit_result()
     if (is.null(fit)) return(NULL)
-    DT::datatable(format_params(fit$theta),
+    DT::datatable(format_model_params(fit$theta, fit$param_units),
                   options = list(dom = "t", paging = FALSE),
                   rownames = FALSE)
   })

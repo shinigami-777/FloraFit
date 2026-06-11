@@ -403,3 +403,176 @@ fit_floral_circuit <- function(freq, Z, theta_init = NULL,
     refined    = isTRUE(refine_tau)
   )
 }
+
+# ---- generic model fitter used by Shiny app --------------------------------
+#
+# Strategy: log-space Levenberg-Marquardt with multi-start.
+# All positive parameters (R, C, tau, Q) are optimized in log10 space so a
+# single LM step can move them across many orders of magnitude. Parameters
+# bounded on (0, 1) (e.g. Cole alpha) use a logit transform. Multi-start
+# perturbs the initial guess in log-space and keeps the lowest-RSS result,
+# which makes the fitter robust to poor user guesses on any of the circuits.
+
+is_bounded_unit <- function(param_name) {
+  param_name == "alpha"
+}
+
+param_to_x <- function(theta, lower, upper, param_names) {
+  vapply(param_names, function(p) {
+    val <- as.numeric(theta[[p]])
+    if (is_bounded_unit(p)) {
+      lo <- max(as.numeric(lower[[p]]), 1e-6)
+      hi <- min(as.numeric(upper[[p]]), 1 - 1e-6)
+      val <- min(max(val, lo + 1e-6), hi - 1e-6)
+      u <- (val - lo) / (hi - lo)
+      log(u / (1 - u))
+    } else {
+      val <- max(val, 1e-15)
+      log10(val)
+    }
+  }, numeric(1))
+}
+
+x_to_param <- function(x, lower, upper, param_names) {
+  out <- vapply(seq_along(param_names), function(i) {
+    p <- param_names[i]
+    if (is_bounded_unit(p)) {
+      lo <- max(as.numeric(lower[[p]]), 1e-6)
+      hi <- min(as.numeric(upper[[p]]), 1 - 1e-6)
+      u <- 1 / (1 + exp(-x[i]))
+      lo + (hi - lo) * u
+    } else {
+      10^x[i]
+    }
+  }, numeric(1))
+  names(out) <- param_names
+  out
+}
+
+fit_impedance_model <- function(freq, Z, model_id, theta_init = NULL,
+                                voigt_n = 2L, maxiter = 500,
+                                n_starts = 12L, seed = 1L) {
+  spec <- get_model_spec(model_id, voigt_n = voigt_n)
+  omega <- 2 * pi * freq
+
+  if (is.null(theta_init)) {
+    theta_init <- default_initial_guess_by_model(freq, Z, model_id,
+                                                 voigt_n = voigt_n)
+  }
+  theta_init <- theta_init[spec$param_names]
+
+  lower <- spec$lower[spec$param_names]
+  upper <- spec$upper[spec$param_names]
+
+  theta_init_clipped <- vapply(spec$param_names, function(p) {
+    v <- as.numeric(theta_init[[p]])
+    if (is_bounded_unit(p)) {
+      min(max(v, as.numeric(lower[[p]])), as.numeric(upper[[p]]))
+    } else {
+      min(max(v, as.numeric(lower[[p]])), as.numeric(upper[[p]]))
+    }
+  }, numeric(1))
+  names(theta_init_clipped) <- spec$param_names
+
+  weights <- 1 / pmax(Mod(Z), 1)
+
+  residual_fn <- function(x) {
+    theta <- x_to_param(x, lower, upper, spec$param_names)
+    Z_fit <- spec$impedance(omega, theta)
+    if (any(!is.finite(Z_fit))) {
+      return(rep(1e6, 2 * length(omega)))
+    }
+    diff <- (Z - Z_fit) * weights
+    c(Re(diff), Im(diff))
+  }
+
+  run_lm <- function(x0) {
+    ctrl <- minpack.lm::nls.lm.control(maxiter = maxiter, ftol = 1e-12,
+                                       ptol = 1e-12, factor = 100)
+    tryCatch({
+      fit <- minpack.lm::nls.lm(par = x0, fn = residual_fn, control = ctrl)
+      theta_hat <- x_to_param(fit$par, lower, upper, spec$param_names)
+      Z_hat <- spec$impedance(omega, theta_hat)
+      if (any(!is.finite(Z_hat))) return(NULL)
+      list(
+        theta = theta_hat,
+        Z_fit = Z_hat,
+        rss = fit_rss(Z, Z_hat),
+        niter = fit$niter,
+        converged = fit$info %in% 1:4,
+        message = fit$message
+      )
+    }, error = function(e) NULL)
+  }
+
+  x0_base <- param_to_x(theta_init_clipped, lower, upper, spec$param_names)
+  n_starts <- max(1L, as.integer(n_starts))
+
+  set.seed(seed)
+  starts <- vector("list", n_starts)
+  starts[[1]] <- x0_base
+  if (n_starts > 1L) {
+    for (i in seq.int(2L, n_starts)) {
+      perturb <- stats::rnorm(length(x0_base), mean = 0,
+                              sd = ifelse(is_bounded_unit(spec$param_names),
+                                          0.5, 0.7))
+      starts[[i]] <- x0_base + perturb
+    }
+  }
+
+  results <- Filter(Negate(is.null), lapply(starts, run_lm))
+  if (length(results) == 0L) {
+    stop("All fit attempts failed for model: ", spec$id)
+  }
+  rss_vec <- vapply(results, function(r) r$rss, numeric(1))
+  best <- results[[which.min(rss_vec)]]
+
+  theta <- best$theta
+  Z_hat <- best$Z_fit
+  rss <- best$rss
+  tss <- sum(Mod(Z - mean(Z))^2)
+  r2 <- 1 - rss / tss
+  rmse <- sqrt(mean(Mod(Z - Z_hat)^2))
+
+  extra <- character(0)
+  if (identical(spec$id, "single_shell")) {
+    extra <- c(extra, sprintf("tau_m [s]:  %s  (Ri * Cm)",
+                              signif(theta["Ri"] * theta["Cm"], 4)))
+  } else if (identical(spec$id, "double_shell")) {
+    extra <- c(
+      extra,
+      sprintf("tau_m [s]:  %s  (Ri * Cm)",
+              signif(theta["Ri"] * theta["Cm"], 4)),
+      sprintf("tau_v [s]:  %s  (Rv * Cv)",
+              signif(theta["Rv"] * theta["Cv"], 4))
+    )
+  } else if (identical(spec$id, "cole")) {
+    extra <- c(extra, sprintf("alpha:      %s", signif(theta["alpha"], 4)))
+  } else if (identical(spec$id, "voigt")) {
+    tau_lines <- vapply(seq_len(as.integer(voigt_n)), function(k) {
+      rk <- theta[paste0("R", k)]
+      ck <- theta[paste0("C", k)]
+      sprintf("tau_%d [s]:  %s  (R%d * C%d)", k,
+              signif(rk * ck, 4), k, k)
+    }, character(1))
+    extra <- c(extra, tau_lines)
+  }
+
+  list(
+    model_id = spec$id,
+    model_label = spec$label,
+    equation = spec$equation,
+    param_names = spec$param_names,
+    param_units = spec$param_units,
+    theta = theta,
+    theta_init = theta_init_clipped,
+    Z_fit = Z_hat,
+    r2 = r2,
+    rmse = rmse,
+    niter = best$niter,
+    converged = best$converged,
+    message = best$message,
+    n_starts = length(results),
+    extra_summary = extra
+  )
+}

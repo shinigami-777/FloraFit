@@ -55,3 +55,118 @@ tau_v_bounds <- function(freq) {
     50 / (2 * pi * f_min)
   )
 }
+
+# ---- generic model support used by the Shiny app ----------------------------
+
+MODEL_CHOICES <- c(
+  "Voigt" = "voigt",
+  "Single-Shell" = "single_shell",
+  "Double-Shell" = "double_shell",
+  "Cole" = "cole"
+)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+voigt_impedance <- function(omega, theta, n_elements) {
+  Z <- rep(theta["R0"], length(omega))
+  for (k in seq_len(n_elements)) {
+    rk <- theta[paste0("R", k)]
+    ck <- theta[paste0("C", k)]
+    Z <- Z + rk / (1 + 1i * omega * rk * ck)
+  }
+  Z
+}
+
+single_shell_impedance <- function(omega, theta) {
+  Re <- theta["Re"]
+  Ri <- theta["Ri"]
+  Cm <- theta["Cm"]
+  Re + Ri / (1 + 1i * omega * Ri * Cm)
+}
+
+double_shell_impedance <- function(omega, theta) {
+  Re <- theta["Re"]
+  Cm <- theta["Cm"]
+  Ri <- theta["Ri"]
+  Rv <- theta["Rv"]
+  Cv <- theta["Cv"]
+  Z_cm <- 1 / (1i * omega * Cm)
+  Z_v <- Rv / (1 + 1i * omega * Rv * Cv)
+  Re + z_parallel(Z_cm, Ri + Z_v)
+}
+
+cole_impedance <- function(omega, theta) {
+  R_inf <- theta["R_inf"]
+  R_0   <- theta["R_0"]
+  tau   <- theta["tau"]
+  alpha <- theta["alpha"]
+  R_inf + (R_0 - R_inf) / (1 + (1i * omega * tau)^alpha)
+}
+
+get_model_spec <- function(model_id, voigt_n = 2L) {
+  model_id <- as.character(model_id %||% "voigt")
+  voigt_n <- as.integer(voigt_n %||% 2L)
+  voigt_n <- max(1L, min(voigt_n, 6L))
+
+  if (identical(model_id, "voigt")) {
+    param_names <- c("R0", as.vector(rbind(paste0("R", seq_len(voigt_n)),
+                                           paste0("C", seq_len(voigt_n)))))
+    param_units <- c("Ohm", rep(c("Ohm", "F"), voigt_n))
+    lower <- setNames(c(1e-3, rep(c(1e-3, 1e-12), voigt_n)), param_names)
+    upper <- setNames(c(1e8, rep(c(1e8, 1), voigt_n)), param_names)
+    return(list(
+      id = "voigt",
+      label = "Voigt",
+      param_names = param_names,
+      param_units = param_units,
+      lower = lower,
+      upper = upper,
+      equation = "Z(w)=R0+sum_k Rk/(1+j*w*Rk*Ck)",
+      impedance = function(omega, theta) voigt_impedance(omega, theta, voigt_n)
+    ))
+  }
+
+  if (identical(model_id, "single_shell")) {
+    param_names <- c("Re", "Ri", "Cm")
+    return(list(
+      id = "single_shell",
+      label = "Single-Shell",
+      param_names = param_names,
+      param_units = c("Ohm", "Ohm", "F"),
+      lower = setNames(c(1e-3, 1e-3, 1e-12), param_names),
+      upper = setNames(c(1e8, 1e8, 1), param_names),
+      equation = "Z(w)=Re+Ri/(1+j*w*Ri*Cm)",
+      impedance = function(omega, theta) single_shell_impedance(omega, theta)
+    ))
+  }
+
+  if (identical(model_id, "double_shell")) {
+    param_names <- c("Re", "Cm", "Ri", "Rv", "Cv")
+    return(list(
+      id = "double_shell",
+      label = "Double-Shell",
+      param_names = param_names,
+      param_units = c("Ohm", "F", "Ohm", "Ohm", "F"),
+      lower = setNames(c(1e-3, 1e-12, 1e-3, 1e-3, 1e-12), param_names),
+      upper = setNames(c(1e8, 1, 1e8, 1e8, 1), param_names),
+      equation = "Z(w)=Re+[(1/(j*w*Cm))||(Ri+Rv/(1+j*w*Rv*Cv))]",
+      impedance = function(omega, theta) double_shell_impedance(omega, theta)
+    ))
+  }
+
+  if (identical(model_id, "cole")) {
+    param_names <- c("R_inf", "R_0", "tau", "alpha")
+    return(list(
+      id = "cole",
+      label = "Cole",
+      param_names = param_names,
+      param_units = c("Ohm", "Ohm", "s", "-"),
+      lower = setNames(c(1e-3, 1e-3, 1e-9, 0.1), param_names),
+      upper = setNames(c(1e8, 1e8, 1e3, 0.999), param_names),
+      equation = "Z(w)=Rinf+(R0-Rinf)/(1+(j*w*tau)^alpha)",
+      impedance = function(omega, theta) cole_impedance(omega, theta)
+    ))
+  }
+
+  stop("Unknown model id: ", model_id)
+}
