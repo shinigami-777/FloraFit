@@ -1,13 +1,13 @@
 library(shiny)
 library(ggplot2)
-​
+
 source("R/circuit_models.R")
 source("R/initial_guess.R")
 source("R/fitting.R")
 source("R/plotting.R")
-​
+
 # ---- helpers ---------------------------------------------------------------
-​
+
 read_eis_csv <- function(path) {
   df <- read.csv(path, stringsAsFactors = FALSE)
   needed <- c("frequency_Hz", "Z_real", "Z_imag")
@@ -20,7 +20,7 @@ read_eis_csv <- function(path) {
     Z    = complex(real = df$Z_real, imaginary = df$Z_imag)
   )
 }
-​
+
 format_params <- function(theta) {
   data.frame(
     Parameter = names(theta),
@@ -29,7 +29,7 @@ format_params <- function(theta) {
     stringsAsFactors = FALSE
   )
 }
-​
+
 format_model_params <- function(theta, units) {
   data.frame(
     Parameter = names(theta),
@@ -38,9 +38,9 @@ format_model_params <- function(theta, units) {
     stringsAsFactors = FALSE
   )
 }
-​
+
 # ---- UI --------------------------------------------------------------------
-​
+
 app_css <- "
   body { background-color: #f7f8fa; }
   .app-title {
@@ -82,7 +82,7 @@ app_css <- "
     max-height: 220px;
   }
 "
-​
+
 ui <- fluidPage(
   tags$head(tags$style(HTML(app_css))),
   div(class = "app-title",
@@ -139,15 +139,15 @@ ui <- fluidPage(
     )
   )
 )
-​
+
 # ---- server ----------------------------------------------------------------
-​
+
 server <- function(input, output, session) {
-​
+
   model_spec <- reactive({
     get_model_spec(input$model_id, voigt_n = input$voigt_n %||% 2L)
   })
-​
+
   data_in <- reactive({
     if (isTRUE(input$use_sample) && is.null(input$file)) {
       if (!file.exists("data/sample_eis.csv")) {
@@ -165,7 +165,7 @@ server <- function(input, output, session) {
                NULL
              })
   })
-​
+
   default_guess <- reactive({
     d <- data_in()
     req(d)
@@ -176,23 +176,23 @@ server <- function(input, output, session) {
       voigt_n = input$voigt_n %||% 2L
     )
   })
-​
+
   guess_values <- reactiveVal(NULL)
-​
+
   observeEvent(default_guess(), {
     guess_values(default_guess())
   }, ignoreInit = FALSE)
-​
+
   observeEvent(input$reset_guess, {
     guess_values(default_guess())
   })
-​
+
   output$initial_guess_ui <- renderUI({
     spec <- model_spec()
     dflt <- guess_values()
     if (is.null(dflt)) dflt <- default_guess()
     dflt <- dflt[spec$param_names]
-​
+
     controls <- lapply(spec$param_names, function(p) {
       val <- as.numeric(dflt[[p]])
       lower <- as.numeric(spec$lower[[p]])
@@ -209,7 +209,7 @@ server <- function(input, output, session) {
     })
     do.call(tagList, controls)
   })
-​
+
   user_guess <- reactive({
     spec <- model_spec()
     dflt <- default_guess()
@@ -220,7 +220,7 @@ server <- function(input, output, session) {
     names(vals) <- spec$param_names
     vals
   })
-​
+
   fit_result <- eventReactive(input$fit, {
     d <- data_in()
     req(d)
@@ -235,7 +235,7 @@ server <- function(input, output, session) {
       )
     })
   }, ignoreNULL = FALSE)
-​
+
   output$summary <- renderPrint({
     fit <- fit_result()
     if (is.null(fit)) {
@@ -251,7 +251,7 @@ server <- function(input, output, session) {
       cat(paste0(fit$extra_summary, collapse = "\n"), "\n", sep = "")
     }
   })
-​
+
   output$params <- DT::renderDT({
     fit <- fit_result()
     if (is.null(fit)) return(NULL)
@@ -259,25 +259,25 @@ server <- function(input, output, session) {
                   options = list(dom = "t", paging = FALSE),
                   rownames = FALSE)
   })
-​
+
   output$nyquist <- renderPlot({
     d <- data_in(); req(d)
     fit <- tryCatch(fit_result(), error = function(e) NULL)
     nyquist_plot(d$freq, d$Z, if (!is.null(fit)) fit$Z_fit else NULL)
   })
-​
+
   output$bode_mag <- renderPlot({
     d <- data_in(); req(d)
     fit <- tryCatch(fit_result(), error = function(e) NULL)
     bode_plot(d$freq, d$Z, if (!is.null(fit)) fit$Z_fit else NULL)$magnitude
   })
-​
+
   output$bode_phase <- renderPlot({
     d <- data_in(); req(d)
     fit <- tryCatch(fit_result(), error = function(e) NULL)
     bode_plot(d$freq, d$Z, if (!is.null(fit)) fit$Z_fit else NULL)$phase
   })
-​
+
   output$raw <- DT::renderDT({
     d <- data_in(); req(d)
     DT::datatable(data.frame(
@@ -289,5 +289,5 @@ server <- function(input, output, session) {
     ), options = list(pageLength = 15))
   })
 }
-​
+
 shinyApp(ui, server)
