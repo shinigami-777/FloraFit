@@ -4,7 +4,8 @@ An R application for fitting equivalent-circuit models to electrochemical impeda
 double-shell, Cole), a data-driven initial-guess generator and a robust
 multi-stage non-linear least-squares fitter.
 
-![Application screenshot](https://github.com/user-attachments/assets/9ee60cad-aef2-4406-8d2c-fca03b37266b)
+<img width="1899" height="954" alt="image" src="https://github.com/user-attachments/assets/a2edc329-2312-4f3c-a29d-e5447e012e24" />
+
 
 ---
 
